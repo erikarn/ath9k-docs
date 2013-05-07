@@ -276,11 +276,8 @@ that meets the relevant restrictions.
   code knows to setup the aggregate fields.
 
 
-Aggregation: Frame retransmission
----------------------------------
-
-TODO
-
+Aggregation: Frame completion
+-----------------------------
 
 An aggregate session frame ends up in xmit.c:ath_tx_complete_aggr().
 This checks the block-ack status - frames that were successfully ACKed
@@ -298,11 +295,49 @@ If any of the A-MPDU sub-frames have been retransmitted too often,
 xmit.c:ath_send_bar() is called to send a BAR.
 
 
+Aggregation: Frame retransmission
+---------------------------------
+
+During aggregation, frames that fail to transmit succesfully need
+to be retried. This is doubly important for correct block-ack window
+tracking - all the frames inside the current block-ack window need to
+be transmitted successfully before the window can advance.
+
+As background information - this doesn't necessarily mean the full window
+is filled and transmitted before it is advanced.  If there are any frames
+at the head of the current block-ack window which need retransmitting,
+the queue will stall.  But the window will be advanced if the frames
+at the head of the block-ack window were succesfully transmitted.
+
+But this can't be done indefinitely.  Eventually a limit will be reached
+and the frame will be marked as failed.  At this point the receiver needs
+to be notified that the block-ack window needs to be moved - this is
+where a BAR frame is sent with the new block-ack window information.
+
+Thus, frame retransmission is implemented as such:
+
+* ath_tx_complete_aggr() walks the list of sub-frames in an A-MPDU and
+  if it has succeeded, the sub-frame is removed from the BAW as mentioned
+  above.
+
+* If a sub-frame fails, the sub-frame is retried only if the retry count
+  is less than ATH_MAX_SW_RETRIES and it is marked as a retry frame
+  by calling xmit.c:ath_tx_set_retry().  This takes care of marking
+  the frame as retry, incrementing the retry counter and re-syncing the
+  transmit buffer via a call to dma_sync_single_for_device().
+
+* If any sub-frame fails, the BAR index is calculated and stored in
+  bar_index.
+
+* If bar_index has been set, then a call to xmit.c:ath_send_bar() is made
+  to send a BAR frame to the remote peer.
+
+
 Aggregation: BAR transmission
 -----------------------------
 
-TODO
-
+BAR frame transmission is simple - xmit.c:ath_send_bar() notifies
+mac80211 to transmit a BAR frame via a call to ieee80211_send_bar().
 
 
 Aggregation: Handling filtered frames
@@ -321,6 +356,7 @@ Stuff not yet discussed
 -----------------------
 
 * hardware queue handling in more depth
+* why there's such a thing as "holding descriptors."
 * flushing node/TID during disassociation/reassociation
 * aggregation setup and teardown
 * how the deferred ieee80211_tx_status() processing works
