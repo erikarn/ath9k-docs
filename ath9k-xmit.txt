@@ -124,6 +124,44 @@ There are a few paths that frame transmission can take:
 * If the frame is in an aggregate TID, it may be direct dispatched
   or queued in a software queue for future transmission.
 
+Handling filtered frames
+-------------------------------------
+
+The MAC can track whether transmission to a node is continuously failing
+and if so, the MAC will stop transmitting any further frames to the
+node.  That way it doesn't waste air time trying to transmit to a node
+that isn't available or awake; it completes each frame immediately
+with the ATH9K_TXERR_FILT bit set in the TX status field.
+
+If the CLRDMASK bit is set in a TX descriptor, the MAC will clear
+the "filtered" bit for the given node and force the next transmission
+to be attempted.
+
+The implementation however is a little tricky as it involves both
+mac80211 and the driver.
+
+* If a frame completes with ATH9K_TXERR_FILT set, the ieee80211_tx_info
+  flags field is marked with IEEE80211_TX_STAT_TX_FILTERED.
+
+* ieee80211_tx_status() is then called with the frame.
+
+* ieee80211_tx_status() will call ieee80211_handle_filtered_frame(),
+  which clears a bunch of state and pushes the frame into the
+  mac80211 station tx_filtered[] queue.  There's one queue per TID.
+
+* When the station wakes up or a PS-POLL frame is received,
+  frames will be dequeued from the filtered frames list first
+  before servicing other frames.
+
+TODO:
+
+* If an aggregate frame exceeds the retry count as part of a filtered
+  frame from the MAC, ath_tx_complete_buf() will mark that sub-frame
+  as filtered and pass it up to mac80211 via ieee80211_tx_status().
+  I think this causes the frame to be pushed into the mac80211
+  filtered frame queue.  But it's already been retransmitted a bunch
+  of times with an established sequence number.  Will this cause issues?
+
 
 Aggregation: Overview
 ---------------------
@@ -132,6 +170,29 @@ In order to gather frames to transmit for A-MPDU transmission, the driver
 needs to gather individual frames from mac80211 (via ath9k_tx() ->
 ath_tx_start()), store them in the pending frame list ('ath_atx_tid->buf_q')
 and then assemble these as an A-MPDU frame to the hardware.
+
+Aggregation: Setup and Teardown
+-------------------------------
+
+Although mac80211 handles the ADDBA negotiation and teardown handling,
+the driver has hooks into this process so its own local state can be
+updated.
+
+* xmit.c:ath_tx_aggr_start() is called when aggregation is being
+  setup.  Local state is setup and the TID is paused so setup
+  will have time to complete.
+
+* xmit.c:ath_tx_aggr_resume() is called once aggregation setup
+  is completed; it unpauses the TID.
+
+* xmit.c:ath_tx_aggr_stop() is called to tear down aggregation.
+  This involves marking the TID as draining and flushing out the
+  frames in the pending queue.  Once frames in hardware queue
+  have completed, the TID will be unpaused.
+
+* xmit.c:ath_tx_aggr_sleep() and xmit.c:ath_tx_aggr_wakeup() are
+  called as part of the node power-save handling - this pauses and
+  resumes transmission for the given node.
 
 
 Aggregation: Tracking Block-ack Windows
@@ -222,7 +283,6 @@ for transmission if enough show up.
 The downside? If frames don't come in quickly enough and the medium is
 quite clean, you may not end up aggregating frames very efficiently.
 Whether this is a problem or not is left as an exercise to the reader.
-
 
 How this is implemented:
 
@@ -340,23 +400,26 @@ BAR frame transmission is simple - xmit.c:ath_send_bar() notifies
 mac80211 to transmit a BAR frame via a call to ieee80211_send_bar().
 
 
-Aggregation: Handling filtered frames
--------------------------------------
-
-TODO
-
-
 How power-save stations work
 ----------------------------
 
-TODO
+When a node is in power-save, the driver should stop transmission to
+the given node.  It just wastes air time transmitting to a station
+which won't actually respond to traffic.
+
+xmit.c:ath_tx_aggr_sleep() and xmit.c:ath_tx_aggr_wakeup() are
+called as part of the node power-save handling - this pauses and
+resumes transmission for the given node.
+
+ath_tx_aggr_sleep() walks each TID in the node and pauses it.
+
+ath_tx_aggr_wakeup() walks each TID in the node, makes sure CLRDMASK is set
+on the next frame by setting clear_ps_filter, and resuming the TID.
 
 
 Stuff not yet discussed
 -----------------------
 
-* hardware queue handling in more depth
-* why there's such a thing as "holding descriptors."
 * flushing node/TID during disassociation/reassociation
 * aggregation setup and teardown
 * how the deferred ieee80211_tx_status() processing works
