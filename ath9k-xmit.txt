@@ -421,7 +421,6 @@ Stuff not yet discussed
 -----------------------
 
 * flushing node/TID during disassociation/reassociation
-* aggregation setup and teardown
 * how the deferred ieee80211_tx_status() processing works
   once the TXQ lock is released
 * how serialisation and ordering is actually implemented,
